@@ -6,6 +6,10 @@ setup(
     packages=find_packages(),
     install_requires=[
         # Add dependencies here
+        "openai-agents>=0.0.6",
+        "openai>=1.66.5",
+        "pydantic<3,>=2.10",
+        "typing-extensions<5,>=4.12.2",
     ],
     entry_points={
         'console_scripts': [
