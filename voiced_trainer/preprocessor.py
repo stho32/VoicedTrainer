@@ -75,7 +75,7 @@ class TextPreprocessor:
             logger.error(f"Error reading file {file_path}: {e}")
             return ""
     
-    def _split_text_into_chunks(self, text: str, chunk_size: int = 4000) -> List[str]:
+    def _split_text_into_chunks(self, text: str, chunk_size: int = 3000) -> List[str]:
         """
         Split text into manageable chunks.
         
@@ -109,6 +109,280 @@ class TextPreprocessor:
             
         return chunks
     
+    def _extract_topics_from_chunks(self, text_chunks: List[str], num_topics: int = NUM_TOPICS) -> List[Dict[str, str]]:
+        """
+        Extract main topics from text chunks using a hierarchical approach for large documents.
+        
+        Args:
+            text_chunks: List of text chunks
+            num_topics: Number of topics to extract
+            
+        Returns:
+            List of topic dictionaries with 'title' and high-level 'content'
+        """
+        logger.info(f"Extracting {num_topics} topics from text using a hierarchical approach...")
+        
+        # Step 1: Create summaries of each chunk
+        chunk_summaries = []
+        
+        for i, chunk in enumerate(tqdm(text_chunks, desc="Summarizing chunks")):
+            if not chunk.strip():
+                continue
+                
+            summary_prompt = (
+                f"Summarize the following text in 2-3 sentences, capturing its key points and main ideas:"
+            )
+            
+            try:
+                response = self.client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that summarizes text accurately."},
+                        {"role": "user", "content": f"{summary_prompt}\n\nTEXT:\n{chunk}"}
+                    ]
+                )
+                
+                summary = response.choices[0].message.content
+                chunk_summaries.append(summary)
+                
+            except Exception as e:
+                logger.error(f"Error summarizing chunk {i}: {e}")
+                # Add a placeholder if summarization fails
+                chunk_summaries.append(f"Content from section {i+1}")
+        
+        # Step 2: Combine summaries into batches to avoid token limits
+        combined_summaries = []
+        
+        batch_size = 10  # Number of summaries per batch
+        for i in range(0, len(chunk_summaries), batch_size):
+            batch = chunk_summaries[i:i+batch_size]
+            combined_summaries.append("\n\n".join(batch))
+        
+        # Step 3: Extract potential topics from each summary batch
+        all_potential_topics = []
+        
+        for i, summary_batch in enumerate(tqdm(combined_summaries, desc="Analyzing summary batches")):
+            topics_prompt = (
+                f"Analyze the following text summaries and identify important topics or concepts. "
+                f"For each topic, provide a clear, concise title and a brief one-sentence description. "
+                f"Format as a numbered list with 'Topic: [title]' and 'Description: [description]' on separate lines."
+            )
+            
+            try:
+                response = self.client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that extracts key topics from text."},
+                        {"role": "user", "content": f"{topics_prompt}\n\nTEXT SUMMARIES:\n{summary_batch}"}
+                    ]
+                )
+                
+                topics_text = response.choices[0].message.content
+                
+                # Parse the topics
+                current_topic = None
+                current_description = None
+                
+                for line in topics_text.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Check if line contains a topic
+                    if line.lower().startswith(("topic:", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.", "10.")):
+                        # Save previous topic if exists
+                        if current_topic and current_description:
+                            all_potential_topics.append({
+                                "title": current_topic,
+                                "description": current_description
+                            })
+                        
+                        # Extract new topic
+                        if ":" in line:
+                            parts = line.split(":", 1)
+                            if len(parts) > 1:
+                                topic_text = parts[1].strip()
+                                if line.lower().startswith("topic:"):
+                                    current_topic = topic_text
+                                    current_description = None
+                                else:
+                                    # Handle numbered list with colon
+                                    if "topic:" in line.lower():
+                                        topic_part = line.lower().split("topic:", 1)[1].strip()
+                                        current_topic = topic_part
+                                        current_description = None
+                            else:
+                                current_topic = parts[0].strip()
+                                current_description = None
+                        else:
+                            # Handle numbered list without colon
+                            if "." in line:
+                                current_topic = line.split(".", 1)[1].strip()
+                                current_description = None
+                    
+                    # Check if line contains a description
+                    elif line.lower().startswith("description:") and current_topic:
+                        current_description = line.split(":", 1)[1].strip()
+                        
+                        # If we have both topic and description, save it
+                        if current_topic and current_description:
+                            all_potential_topics.append({
+                                "title": current_topic,
+                                "description": current_description
+                            })
+                            current_topic = None
+                            current_description = None
+                
+                # Add last topic if not added yet
+                if current_topic and current_description:
+                    all_potential_topics.append({
+                        "title": current_topic,
+                        "description": current_description
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Error extracting topics from summary batch {i}: {e}")
+        
+        # Step 4: Consolidate and select the final set of topics
+        topics_summary = "\n".join([f"- {topic['title']}: {topic['description']}" 
+                                  for topic in all_potential_topics[:min(30, len(all_potential_topics))]])
+        
+        final_topics_prompt = (
+            f"Based on the following list of potential topics extracted from a document, "
+            f"identify the {num_topics} most significant and representative topics. "
+            f"Combine similar topics and ensure diversity of coverage. "
+            f"For each final topic, provide a clear, concise title.\n\n"
+            f"POTENTIAL TOPICS:\n{topics_summary}"
+        )
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that consolidates topics effectively."},
+                    {"role": "user", "content": final_topics_prompt}
+                ]
+            )
+            
+            final_topics_text = response.choices[0].message.content
+            logger.info(f"Final topics selection:\n{final_topics_text}")
+            
+            # Parse final topics
+            final_topics = []
+            current_topic = ""
+            
+            for line in final_topics_text.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Extract topic titles from numbered list or bullet points
+                if line[0].isdigit() and ". " in line:
+                    current_topic = line.split(". ", 1)[1].strip()
+                    if ":" in current_topic:
+                        current_topic = current_topic.split(":", 1)[0].strip()
+                    final_topics.append({"title": current_topic, "content": ""})
+                elif line.startswith("- ") or line.startswith("* "):
+                    current_topic = line[2:].strip()
+                    if ":" in current_topic:
+                        current_topic = current_topic.split(":", 1)[0].strip()
+                    final_topics.append({"title": current_topic, "content": ""})
+            
+            # Ensure we have exactly num_topics
+            final_topics = final_topics[:num_topics]
+            while len(final_topics) < num_topics:
+                topic_index = len(final_topics) + 1
+                final_topics.append({"title": f"Topic {topic_index}", "content": ""})
+            
+            return final_topics
+            
+        except Exception as e:
+            logger.error(f"Error consolidating final topics: {e}")
+            
+            # Create default topics as fallback
+            default_topics = []
+            for i in range(num_topics):
+                default_topics.append({
+                    "title": f"Topic {i+1}",
+                    "content": ""
+                })
+            return default_topics
+    
+    def _generate_topic_content(self, topic_title: str, text_chunks: List[str]) -> str:
+        """
+        Generate detailed content for a specific topic by analyzing relevant chunks.
+        
+        Args:
+            topic_title: The title of the topic
+            text_chunks: List of all text chunks
+            
+        Returns:
+            Detailed content for the topic
+        """
+        logger.info(f"Generating content for topic '{topic_title}'...")
+        
+        # Step 1: Identify chunks relevant to this topic
+        relevant_chunks = []
+        
+        for i, chunk in enumerate(text_chunks):
+            relevance_prompt = (
+                f"Determine if the following text is relevant to the topic '{topic_title}'. "
+                f"Answer with only 'Yes' or 'No'."
+            )
+            
+            try:
+                response = self.client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant determining text relevance."},
+                        {"role": "user", "content": f"{relevance_prompt}\n\nTEXT:\n{chunk}"}
+                    ]
+                )
+                
+                answer = response.choices[0].message.content.strip().lower()
+                if "yes" in answer:
+                    relevant_chunks.append(chunk)
+                    
+                # Limit the number of relevant chunks to avoid token limits
+                if len(relevant_chunks) >= 5:
+                    break
+                    
+            except Exception as e:
+                logger.error(f"Error assessing relevance for chunk {i}: {e}")
+        
+        # If no chunks were found relevant, use the first few chunks as fallback
+        if not relevant_chunks and text_chunks:
+            relevant_chunks = text_chunks[:min(3, len(text_chunks))]
+        
+        # Step 2: Generate content based on relevant chunks
+        if not relevant_chunks:
+            return f"No detailed information available for '{topic_title}'."
+        
+        # Combine relevant chunks, but ensure we don't exceed token limits
+        combined_text = "\n\n".join(relevant_chunks[:3])  # Limit to 3 chunks
+        
+        content_prompt = (
+            f"Based on the following text excerpts, create a comprehensive explanation about the topic '{topic_title}'. "
+            f"Include key concepts, examples, and insights from the text. "
+            f"The content should be detailed enough to serve as learning material (about 500-800 words)."
+        )
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that creates educational content."},
+                    {"role": "user", "content": f"{content_prompt}\n\nTEXT EXCERPTS:\n{combined_text}"}
+                ]
+            )
+            
+            content = response.choices[0].message.content
+            return content
+            
+        except Exception as e:
+            logger.error(f"Error generating content for topic '{topic_title}': {e}")
+            return f"Failed to generate detailed content for '{topic_title}' due to an error."
+    
     def _extract_topics(self, text_chunks: List[str], num_topics: int = NUM_TOPICS) -> List[Dict[str, str]]:
         """
         Extract main topics from text chunks using OpenAI.
@@ -120,75 +394,14 @@ class TextPreprocessor:
         Returns:
             List of topic dictionaries with 'title' and 'content'
         """
-        logger.info(f"Extracting {num_topics} topics from text...")
+        # First, extract topic titles and high-level descriptions
+        topics = self._extract_topics_from_chunks(text_chunks, num_topics)
         
-        # First, we'll extract potential topic titles from the chunks
-        topics_prompt = (
-            f"Analyze the following text and identify {num_topics} distinct main topics or concepts. "
-            f"For each topic, provide a clear, concise title and a brief one-sentence description. "
-            f"Format as a numbered list."
-        )
+        # Then generate detailed content for each topic
+        for topic in tqdm(topics, desc="Generating topic content"):
+            topic["content"] = self._generate_topic_content(topic["title"], text_chunks)
         
-        # Join some chunks to get a good overview (limit to avoid token limits)
-        sample_text = "\n\n".join(text_chunks[:min(5, len(text_chunks))])
-        
-        try:
-            response = self.client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that extracts key topics from text."},
-                    {"role": "user", "content": f"{topics_prompt}\n\nTEXT:\n{sample_text}"}
-                ]
-            )
-            
-            topics_text = response.choices[0].message.content
-            logger.info(f"Extracted topic suggestions:\n{topics_text}")
-            
-            # Now generate detailed content for each topic
-            topics = []
-            
-            # Extract topic titles (assuming the format is "1. Title: Description")
-            topic_titles = []
-            for line in topics_text.split("\n"):
-                if line.strip() and line[0].isdigit() and ". " in line:
-                    title_part = line.split(": ")[0].split(". ")[1] if ": " in line else line.split(". ")[1]
-                    topic_titles.append(title_part.strip())
-            
-            # Ensure we have exactly num_topics
-            topic_titles = topic_titles[:num_topics]
-            while len(topic_titles) < num_topics:
-                topic_titles.append(f"Additional Topic {len(topic_titles) + 1}")
-            
-            # For each topic, generate detailed content
-            for title in tqdm(topic_titles, desc="Generating topic content"):
-                content_prompt = (
-                    f"Based on the following text, create a comprehensive explanation about the topic '{title}'. "
-                    f"Include key concepts, examples, and insights from the text. "
-                    f"The content should be detailed enough to serve as learning material (about 500-800 words)."
-                )
-                
-                # Use all chunks for comprehensive content
-                complete_text = "\n\n".join(text_chunks)
-                
-                content_response = self.client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": "You are a helpful assistant that creates educational content."},
-                        {"role": "user", "content": f"{content_prompt}\n\nTEXT:\n{complete_text}"}
-                    ]
-                )
-                
-                content = content_response.choices[0].message.content
-                topics.append({
-                    "title": title,
-                    "content": content
-                })
-            
-            return topics
-            
-        except Exception as e:
-            logger.error(f"Error extracting topics: {e}")
-            return []
+        return topics
     
     def _generate_questions(self, topics: List[Dict[str, str]], num_questions: int = 10) -> List[Dict[str, Any]]:
         """

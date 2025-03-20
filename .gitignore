@@ -36,3 +36,5 @@ coverage.xml
 Thumbs.db
 
 *.txt
+*.json
+*.lock

@@ -61,11 +61,12 @@ def main():
     args = parser.parse_args()
 
     # Update config values if specified in command line
-    global NUM_TOPICS, QUESTIONS_PER_TOPIC, VOICE_INPUT_ENABLED, VOICE_OUTPUT_ENABLED
-    NUM_TOPICS = args.topics
-    QUESTIONS_PER_TOPIC = args.questions
-    VOICE_INPUT_ENABLED = args.voice_input
-    VOICE_OUTPUT_ENABLED = args.voice_output
+    # Wir verwenden die Config-Variablen direkt, ohne sie als global zu deklarieren
+    import voiced_trainer.config as config
+    config.NUM_TOPICS = args.topics
+    config.QUESTIONS_PER_TOPIC = args.questions
+    config.VOICE_INPUT_ENABLED = args.voice_input
+    config.VOICE_OUTPUT_ENABLED = args.voice_output
 
     # Print welcome message
     print("\n" + "=" * 60)

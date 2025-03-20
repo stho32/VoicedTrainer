@@ -24,7 +24,7 @@ PREPROCESSED_LOCK_FILE = os.path.join(PROCESSED_DATA_DIR, "preprocessed.lock")
 
 # OpenAI API settings - these should be loaded from environment variables in production
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = "gpt-4"  # Model for text generation
+OPENAI_MODEL = "gpt-4o"  # Model for text generation
 
 # Voice settings
 VOICE_INPUT_ENABLED = False
