@@ -9,6 +9,7 @@ tqdm>=4.65.0
 sounddevice>=0.5.1  # For recording audio
 soundfile>=0.12.1   # For saving audio files
 pydub>=0.25.1       # For playing audio files
+pygame>=2.5.0
 
 # Other dependencies
 numpy>=2.0.0        # Numerical computations for audio
